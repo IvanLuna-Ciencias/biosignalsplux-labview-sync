@@ -1,0 +1,40 @@
+﻿{
+  "session": {
+    "output_root": "outputs",
+    "prestart_seconds": 3.0,
+    "flush_interval_samples": 1000
+  },
+  "biosignalsplux": {
+    "api_path": "REPLACE_WITH_LOCAL_PLUX_API_PATH",
+    "device_address": "REPLACE_WITH_DEVICE_ADDRESS",
+    "sampling_rate_hz": 1000,
+    "resolution_bits": 16,
+    "channel_mask": 3,
+    "channels": [
+      "emg_0",
+      "emg_1"
+    ]
+  },
+  "labview": {
+    "host": "127.0.0.1",
+    "command_channel": {
+      "transport": "udp",
+      "port": 5005
+    },
+    "status_channel": {
+      "enabled": false,
+      "transport": "udp",
+      "port": 5006
+    },
+    "trajectory_stream": {
+      "enabled": false,
+      "transport": "tcp",
+      "port": 5007
+    }
+  },
+  "logging": {
+    "level": "INFO",
+    "console": true,
+    "file": true
+  }
+}

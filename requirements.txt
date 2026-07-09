@@ -1,0 +1,7 @@
+﻿# Runtime dependencies will be added progressively.
+#
+# The PLUX Python API is provided separately by PLUX and is not distributed
+# through this public repository.
+#
+# Install development dependencies from pyproject.toml with:
+# python -m pip install -e ".[dev]"

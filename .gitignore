@@ -1,0 +1,54 @@
+﻿# Python virtual environments
+env310/
+.venv/
+venv/
+
+# Python generated files
+__pycache__/
+*.py[cod]
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# IDE and operating system
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local and private configurations
+configs/*.local.json
+configs/*.local.yaml
+configs/*.local.yml
+.env
+.env.*
+
+# Generated acquisition data
+outputs/
+results/
+resultados/
+logs/
+*.log
+
+# Human or private experimental data
+private_data/
+participant_data/
+raw_data/
+
+# External SDKs, installers and binaries
+vendor/
+sdk/
+*.dll
+*.exe
+*.msi
+
+# Temporary files
+*.tmp
+*.bak
+~$*
+
+# Python package metadata
+*.egg-info/
