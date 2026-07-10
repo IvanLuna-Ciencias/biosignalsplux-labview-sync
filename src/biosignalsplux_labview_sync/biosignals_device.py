@@ -8,6 +8,7 @@ from types import ModuleType
 from typing import Callable
 
 from biosignalsplux_labview_sync.emg_writer import EMGCSVWriter
+from biosignalsplux_labview_sync.live_buffer import EMGLiveBuffer
 
 
 class BiosignalsDeviceError(RuntimeError):
@@ -32,6 +33,7 @@ def create_biosignals_device_class(
             writer: EMGCSVWriter,
             session_origin: float,
             expected_channel_count: int,
+            live_buffer: EMGLiveBuffer | None = None,
             monotonic_clock: Callable[[], float] = time.perf_counter,
             wall_clock: Callable[[], datetime] = _utc_now,
         ) -> None:
@@ -57,12 +59,16 @@ def create_biosignals_device_class(
             self.writer = writer
             self.session_origin = session_origin
             self.expected_channel_count = expected_channel_count
+            self.live_buffer = live_buffer
             self.monotonic_clock = monotonic_clock
             self.wall_clock = wall_clock
 
             self.samples_received = 0
             self.stop_requested = False
             self.callback_error: Exception | None = None
+
+            self.live_buffer_error_count = 0
+            self.last_live_buffer_error: Exception | None = None
 
         def request_stop(self) -> None:
             """Request termination at the next acquisition frame."""
@@ -92,6 +98,8 @@ def create_biosignals_device_class(
                         "The monotonic acquisition time became negative."
                     )
 
+                # Raw storage has priority. A storage failure must stop
+                # acquisition to avoid silently losing experimental data.
                 self.writer.append_sample(
                     device_sequence=int(nSeq),
                     time_monotonic_s=elapsed_s,
@@ -99,11 +107,23 @@ def create_biosignals_device_class(
                     channel_values=values,
                 )
 
+                # Live visualization is secondary. A graphics or buffer
+                # problem must not interrupt raw acquisition.
+                if self.live_buffer is not None:
+                    try:
+                        self.live_buffer.append_sample(
+                            time_monotonic_s=elapsed_s,
+                            channel_values=values,
+                        )
+                    except Exception as exc:
+                        self.live_buffer_error_count += 1
+                        self.last_live_buffer_error = exc
+
                 self.samples_received += 1
 
             except Exception as exc:
-                # Do not allow an exception to escape repeatedly through the
-                # compiled PLUX callback. Store it and stop the device loop.
+                # Avoid allowing an exception to escape repeatedly through
+                # the compiled PLUX callback.
                 self.callback_error = exc
                 self.stop_requested = True
                 return True
