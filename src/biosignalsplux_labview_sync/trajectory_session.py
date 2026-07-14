@@ -375,7 +375,8 @@ class TrajectoryExecutionSession:
         duration_s: float,
         trajectory_time_s: float,
         sample_index: int,
-    ) -> tuple[ReferenceTuple, int]:
+        interruptible: bool,
+    ) -> tuple[ReferenceTuple, int, bool]:
         period_s = 1.0 / self.setpoint_rate_hz
         started_at = self._clock()
         next_tick = started_at
@@ -386,6 +387,9 @@ class TrajectoryExecutionSession:
                 next_tick,
                 period_s,
             )
+            if interruptible and self._stop_event.is_set():
+                return current, sample_index, True
+
             elapsed_s = min(
                 now - started_at,
                 duration_s,
@@ -408,7 +412,7 @@ class TrajectoryExecutionSession:
             sample_index += 1
 
             if elapsed_s >= duration_s:
-                return current, sample_index
+                return current, sample_index, False
 
     def _run_active_trajectory(
         self,
@@ -588,7 +592,11 @@ class TrajectoryExecutionSession:
                 "MOVE_TO_START",
             )
 
-            current, sample_index = self._run_transition(
+            (
+                current,
+                sample_index,
+                transition_stopped,
+            ) = self._run_transition(
                 sender=sender,
                 setpoint_writer=setpoint_writer,
                 initial_deg=current,
@@ -596,9 +604,20 @@ class TrajectoryExecutionSession:
                 duration_s=self.move_to_start_s,
                 trajectory_time_s=0.0,
                 sample_index=sample_index,
+                interruptible=True,
             )
 
-            stopped_early = self._stop_event.is_set()
+            stopped_early = (
+                transition_stopped
+                or self._stop_event.is_set()
+            )
+
+            if stopped_early:
+                self._write_event(
+                    event_writer,
+                    "STOP_REQUESTED",
+                    {"phase": "MOVE_TO_START"},
+                )
 
             if not stopped_early:
                 self._set_state("RUNNING")
@@ -630,7 +649,11 @@ class TrajectoryExecutionSession:
                 "RETURN_STARTED",
             )
 
-            current, sample_index = self._run_transition(
+            (
+                current,
+                sample_index,
+                _,
+            ) = self._run_transition(
                 sender=sender,
                 setpoint_writer=setpoint_writer,
                 initial_deg=current,
@@ -642,6 +665,7 @@ class TrajectoryExecutionSession:
                     else 0.0
                 ),
                 sample_index=sample_index,
+                interruptible=False,
             )
 
             self._set_state("HOLDING_NEUTRAL")
