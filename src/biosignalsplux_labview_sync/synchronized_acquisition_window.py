@@ -14,6 +14,13 @@ from typing import Any
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from biosignalsplux_labview_sync.config import load_config
+from biosignalsplux_labview_sync.force_live_window import ForceLiveWindow
+from biosignalsplux_labview_sync.force_runtime import (
+    PreparedForceRuntime,
+    build_force_summary,
+    force_settings_from_config,
+    prepare_force_runtime,
+)
 from biosignalsplux_labview_sync.live_window import EMGLiveWindow
 from biosignalsplux_labview_sync.session_config_window import (
     SessionConfigurationWindow,
@@ -39,6 +46,83 @@ class AcquisitionRuntimeSettings:
     flush_interval_samples: int
     prestart_seconds: float
     live_window_seconds: float = 5.0
+
+
+@dataclass(frozen=True)
+class WindowGeometry:
+    """One top-level window rectangle in screen coordinates."""
+
+    x: int
+    y: int
+    width: int
+    height: int
+
+
+def calculate_session_window_layout(
+    *,
+    screen_x: int,
+    screen_y: int,
+    screen_width: int,
+    screen_height: int,
+    force_enabled: bool,
+    left_fraction: float = 0.38,
+    gap_px: int = 8,
+) -> dict[str, WindowGeometry]:
+    """Tile the control, sEMG, and ATI windows without overlap."""
+
+    if screen_width <= 0 or screen_height <= 0:
+        raise ValueError("Screen dimensions must be positive.")
+
+    if not 0.25 <= left_fraction <= 0.60:
+        raise ValueError("left_fraction must be between 0.25 and 0.60.")
+
+    if gap_px < 0:
+        raise ValueError("gap_px cannot be negative.")
+
+    usable_width = max(1, screen_width - gap_px)
+    left_width = int(round(usable_width * left_fraction))
+    left_width = max(420, min(left_width, usable_width - 420))
+    right_width = max(1, usable_width - left_width)
+
+    control = WindowGeometry(
+        x=screen_x,
+        y=screen_y,
+        width=left_width,
+        height=screen_height,
+    )
+
+    right_x = screen_x + left_width + gap_px
+
+    if not force_enabled:
+        return {
+            "control": control,
+            "emg": WindowGeometry(
+                x=right_x,
+                y=screen_y,
+                width=right_width,
+                height=screen_height,
+            ),
+        }
+
+    usable_height = max(2, screen_height - gap_px)
+    top_height = usable_height // 2
+    bottom_height = usable_height - top_height
+
+    return {
+        "control": control,
+        "emg": WindowGeometry(
+            x=right_x,
+            y=screen_y,
+            width=right_width,
+            height=top_height,
+        ),
+        "force": WindowGeometry(
+            x=right_x,
+            y=screen_y + top_height + gap_px,
+            width=right_width,
+            height=bottom_height,
+        ),
+    }
 
 
 def runtime_settings_from_config(
@@ -133,6 +217,39 @@ def format_acquisition_summary(
     )
 
 
+
+def format_force_summary(
+    summary: dict[str, object] | None,
+) -> str:
+    """Format optional ATI acquisition results."""
+
+    if summary is None:
+        return "Sensor ATI: deshabilitado"
+
+    return "\n".join(
+        [
+            "Sensor ATI:",
+            (
+                "  Motivo de terminación: "
+                f"{summary['termination_reason']}"
+            ),
+            (
+                "  Muestras recibidas: "
+                f"{summary['samples_received']}"
+            ),
+            (
+                "  Muestras escritas: "
+                f"{summary['samples_written']}"
+            ),
+            (
+                "  Muestras de bias: "
+                f"{summary['bias_samples_used']}"
+            ),
+            f"  CSV fuerza/torque: {summary['force_csv']}",
+        ]
+    )
+
+
 def _json_safe(value: object) -> object:
     if isinstance(value, Exception):
         return str(value)
@@ -162,6 +279,7 @@ def write_sync_report(
     session_duration_s: float,
     acquisition_summary: dict[str, object],
     trajectory_summary: dict[str, object] | None,
+    force_summary: dict[str, object] | None = None,
 ) -> Path:
     """Write the final synchronized-session report."""
 
@@ -185,6 +303,9 @@ def write_sync_report(
         ),
         "trajectory": _json_safe(
             trajectory_summary
+        ),
+        "force_sensor": _json_safe(
+            force_summary
         ),
     }
 
@@ -223,6 +344,8 @@ class SynchronizedSessionWindow(
             TrajectoryExecutionSession | None
         ) = None
         self.live_window: EMGLiveWindow | None = None
+        self.force_runtime: PreparedForceRuntime | None = None
+        self.force_live_window: ForceLiveWindow | None = None
 
         self.settings: AcquisitionRuntimeSettings | None = None
         self.required_baseline_samples = 0
@@ -237,7 +360,7 @@ class SynchronizedSessionWindow(
         self.setWindowTitle(
             "Sesión sincronizada Biosignalsplux–LabVIEW"
         )
-        self.resize(900, 900)
+        self.resize(720, 900)
 
         self._load_local_defaults()
         self._add_runtime_controls()
@@ -311,6 +434,12 @@ class SynchronizedSessionWindow(
         self.samples_value = QtWidgets.QLabel(
             "0"
         )
+        self.force_samples_value = QtWidgets.QLabel(
+            "Deshabilitado"
+        )
+        self.force_bias_value = QtWidgets.QLabel(
+            "No requerido"
+        )
         self.baseline_value = QtWidgets.QLabel(
             "Pendiente"
         )
@@ -342,38 +471,58 @@ class SynchronizedSessionWindow(
             1,
         )
         layout.addWidget(
-            QtWidgets.QLabel("Periodo basal:"),
+            QtWidgets.QLabel("Muestras ATI:"),
             2,
+            0,
+        )
+        layout.addWidget(
+            self.force_samples_value,
+            2,
+            1,
+        )
+        layout.addWidget(
+            QtWidgets.QLabel("Bias ATI:"),
+            3,
+            0,
+        )
+        layout.addWidget(
+            self.force_bias_value,
+            3,
+            1,
+        )
+        layout.addWidget(
+            QtWidgets.QLabel("Periodo basal sEMG:"),
+            4,
             0,
         )
         layout.addWidget(
             self.baseline_value,
-            2,
+            4,
             1,
         )
         layout.addWidget(
             QtWidgets.QLabel("Trayectoria:"),
-            3,
+            5,
             0,
         )
         layout.addWidget(
             self.trajectory_state_value,
-            3,
+            5,
             1,
         )
         layout.addWidget(
             QtWidgets.QLabel("Referencias:"),
-            4,
+            6,
             0,
         )
         layout.addWidget(
             self.references_value,
-            4,
+            6,
             1,
         )
 
         self.start_session_button = QtWidgets.QPushButton(
-            "1. Iniciar adquisición sEMG"
+            "1. Iniciar adquisiciones sEMG + ATI"
         )
         self.start_trajectory_button = QtWidgets.QPushButton(
             "2. Iniciar trayectoria"
@@ -399,31 +548,31 @@ class SynchronizedSessionWindow(
 
         layout.addWidget(
             self.start_session_button,
-            5,
+            7,
             0,
             1,
             2,
         )
         layout.addWidget(
             self.start_trajectory_button,
-            6,
+            8,
             0,
             1,
             2,
         )
         layout.addWidget(
             self.pause_button,
-            7,
+            9,
             0,
         )
         layout.addWidget(
             self.stop_trajectory_button,
-            7,
+            9,
             1,
         )
         layout.addWidget(
             self.stop_session_button,
-            8,
+            10,
             0,
             1,
             2,
@@ -519,6 +668,100 @@ class SynchronizedSessionWindow(
         for widget in widgets:
             widget.setEnabled(enabled)
 
+    def _request_acquisition_stop(self) -> None:
+        """Request stop for every active acquisition device."""
+
+        if (
+            self.runtime is not None
+            and self.runtime.acquisition.is_running
+        ):
+            self.runtime.acquisition.request_stop()
+
+        if (
+            self.force_runtime is not None
+            and self.force_runtime.acquisition.is_running
+        ):
+            self.force_runtime.acquisition.request_stop()
+
+    def _all_acquisitions_finished(self) -> bool:
+        """Return true when sEMG and optional ATI have both finished."""
+
+        if self.runtime is None:
+            return True
+
+        emg_finished = self.runtime.acquisition.is_finished
+        force_finished = (
+            self.force_runtime is None
+            or self.force_runtime.acquisition.is_finished
+        )
+
+        return emg_finished and force_finished
+
+    def _force_ready(self) -> bool:
+        """Return true when ATI is disabled or its bias is available."""
+
+        return (
+            self.force_runtime is None
+            or self.force_runtime.acquisition.bias_ready
+        )
+
+    def _arrange_session_windows(self) -> None:
+        """Place controls left and live monitors on the right."""
+
+        if self.live_window is None:
+            return
+
+        screen = self.screen()
+
+        if screen is None:
+            screen = QtWidgets.QApplication.primaryScreen()
+
+        if screen is None:
+            return
+
+        available = screen.availableGeometry()
+        layout = calculate_session_window_layout(
+            screen_x=available.x(),
+            screen_y=available.y(),
+            screen_width=available.width(),
+            screen_height=available.height(),
+            force_enabled=self.force_live_window is not None,
+        )
+
+        def apply_geometry(
+            window: QtWidgets.QWidget,
+            geometry: WindowGeometry,
+        ) -> None:
+            window.setGeometry(
+                geometry.x,
+                geometry.y,
+                geometry.width,
+                geometry.height,
+            )
+
+        apply_geometry(self, layout["control"])
+        apply_geometry(self.live_window, layout["emg"])
+
+        if (
+            self.force_live_window is not None
+            and "force" in layout
+        ):
+            apply_geometry(
+                self.force_live_window,
+                layout["force"],
+            )
+
+        self.raise_()
+        self.activateWindow()
+
+    def _schedule_window_arrangement(self) -> None:
+        """Arrange windows after Qt has created their native handles."""
+
+        QtCore.QTimer.singleShot(
+            0,
+            self._arrange_session_windows,
+        )
+
     def start_session(self) -> None:
         """Start continuous Biosignalsplux acquisition."""
 
@@ -560,6 +803,37 @@ class SynchronizedSessionWindow(
                 ),
             )
 
+            force_settings = force_settings_from_config(
+                config
+            )
+            force_runtime = None
+            force_live_window = None
+
+            if force_settings is not None:
+                force_runtime = prepare_force_runtime(
+                    settings=force_settings,
+                    session_directory=runtime.paths.directory,
+                    session_id=metadata.session_id,
+                    session_origin=runtime.session_origin,
+                )
+
+                force_live_window = ForceLiveWindow(
+                    live_buffer=force_runtime.live_buffer,
+                    sampling_rate_hz=(
+                        force_settings.sampling_rate_hz
+                    ),
+                    window_seconds=(
+                        force_settings.live_window_seconds
+                    ),
+                    refresh_interval_ms=50,
+                    stop_callback=self.request_full_stop,
+                    show_stop_button=False,
+                )
+                force_live_window.setWindowTitle(
+                    "ATI fuerza/torque en vivo · "
+                    f"{metadata.session_id}"
+                )
+
             live_window = EMGLiveWindow(
                 live_buffer=runtime.live_buffer,
                 channel_names=list(
@@ -573,6 +847,7 @@ class SynchronizedSessionWindow(
                 ),
                 refresh_interval_ms=50,
                 stop_callback=self.request_full_stop,
+                show_stop_button=False,
             )
             live_window.setWindowTitle(
                 f"sEMG en vivo · {metadata.session_id}"
@@ -592,6 +867,8 @@ class SynchronizedSessionWindow(
         self.runtime = runtime
         self.settings = settings
         self.live_window = live_window
+        self.force_runtime = force_runtime
+        self.force_live_window = force_live_window
 
         self.trajectory_session = None
         self.pending_full_stop = False
@@ -623,11 +900,42 @@ class SynchronizedSessionWindow(
                 "muestras"
             )
         )
+        if self.force_runtime is None:
+            self.force_samples_value.setText(
+                "Deshabilitado"
+            )
+            self.force_bias_value.setText(
+                "No requerido"
+            )
+            status_text = (
+                "Iniciando adquisición sEMG continua a 1000 Hz..."
+            )
+        else:
+            self.force_samples_value.setText(
+                "0"
+            )
+            self.force_bias_value.setText(
+                "CALIBRANDO"
+            )
+            status_text = (
+                "Iniciando sEMG y ATI. "
+                "Mantenga el ATI sin carga durante el bias..."
+            )
+
         self.status_label.setText(
-            "Iniciando adquisición continua a 1000 Hz..."
+            status_text
         )
 
         self.live_window.show()
+
+        if self.force_live_window is not None:
+            self.force_live_window.show()
+
+        self._schedule_window_arrangement()
+
+        if self.force_runtime is not None:
+            self.force_runtime.acquisition.start()
+
         self.runtime.acquisition.start()
         self.runtime_timer.start(100)
 
@@ -656,6 +964,15 @@ class SynchronizedSessionWindow(
                 self,
                 "Periodo basal incompleto",
                 "Aún no se ha completado el periodo basal.",
+            )
+            return
+
+        if not self._force_ready():
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Bias ATI incompleto",
+                "El sensor ATI todavía está calculando su bias. "
+                "Manténgalo sin carga y espere unos segundos.",
             )
             return
 
@@ -746,7 +1063,7 @@ class SynchronizedSessionWindow(
             )
             self.status_label.setText(
                 "Trayectoria pausada. "
-                "La adquisición continúa a 1000 Hz."
+                "Las adquisiciones sEMG y ATI continúan."
             )
         else:
             self.pause_button.setText(
@@ -773,7 +1090,7 @@ class SynchronizedSessionWindow(
 
         self.status_label.setText(
             "Retorno controlado solicitado. "
-            "La adquisición sEMG continúa."
+            "Las adquisiciones sEMG y ATI continúan."
         )
 
     def request_full_stop(self) -> None:
@@ -801,9 +1118,9 @@ class SynchronizedSessionWindow(
                 "antes de cerrar la adquisición..."
             )
         else:
-            self.runtime.acquisition.request_stop()
+            self._request_acquisition_stop()
             self.status_label.setText(
-                "Deteniendo adquisición de forma segura..."
+                "Deteniendo adquisiciones de forma segura..."
             )
 
     def _handle_trajectory_finished(self) -> None:
@@ -841,12 +1158,8 @@ class SynchronizedSessionWindow(
                 "La adquisición continúa hasta STOP."
             )
 
-        if (
-            self.pending_full_stop
-            and self.runtime is not None
-            and self.runtime.acquisition.is_running
-        ):
-            self.runtime.acquisition.request_stop()
+        if self.pending_full_stop:
+            self._request_acquisition_stop()
 
     def check_runtime_state(self) -> None:
         """Refresh states and coordinate orderly shutdown."""
@@ -861,31 +1174,64 @@ class SynchronizedSessionWindow(
             str(sample_count)
         )
 
-        if (
-            not self.runtime.acquisition.is_finished
-        ):
-            self.session_state_value.setText(
-                "ADQUIRIENDO A 1000 Hz"
+        force_sample_count = 0
+
+        if self.force_runtime is not None:
+            force_snapshot = (
+                self.force_runtime.live_buffer.snapshot()
+            )
+            force_sample_count = (
+                force_snapshot.total_samples_received
+            )
+            self.force_samples_value.setText(
+                str(force_sample_count)
+            )
+            self.force_bias_value.setText(
+                (
+                    "COMPLETO"
+                    if self.force_runtime.acquisition.bias_ready
+                    else "CALIBRANDO"
+                )
             )
 
-        if sample_count >= self.required_baseline_samples:
+        if not self._all_acquisitions_finished():
+            self.session_state_value.setText(
+                (
+                    "ADQUIRIENDO sEMG + ATI"
+                    if self.force_runtime is not None
+                    else "ADQUIRIENDO sEMG"
+                )
+            )
+
+        emg_baseline_ready = (
+            sample_count
+            >= self.required_baseline_samples
+        )
+
+        if emg_baseline_ready:
             self.baseline_value.setText(
                 "COMPLETO"
             )
-
-            if (
-                not self.trajectory_started_once
-                and not self.pending_full_stop
-            ):
-                self.start_trajectory_button.setEnabled(
-                    True
-                )
         else:
             self.baseline_value.setText(
                 (
                     f"{sample_count} / "
                     f"{self.required_baseline_samples} muestras"
                 )
+            )
+
+        if (
+            emg_baseline_ready
+            and self._force_ready()
+            and not self.trajectory_started_once
+            and not self.pending_full_stop
+        ):
+            self.start_trajectory_button.setEnabled(
+                True
+            )
+        else:
+            self.start_trajectory_button.setEnabled(
+                False
             )
 
         if self.trajectory_session is not None:
@@ -909,21 +1255,35 @@ class SynchronizedSessionWindow(
             ):
                 self._handle_trajectory_finished()
 
-        if self.runtime.acquisition.is_finished:
+        emg_finished = (
+            self.runtime.acquisition.is_finished
+        )
+        force_finished_unexpectedly = (
+            self.force_runtime is not None
+            and self.force_runtime.acquisition.is_finished
+        )
+
+        if (
+            not self.pending_full_stop
+            and (
+                emg_finished
+                or force_finished_unexpectedly
+            )
+        ):
+            self.pending_full_stop = True
+
             if (
                 self.trajectory_session is not None
                 and self.trajectory_session.is_running
             ):
-                self.pending_full_stop = True
                 self.trajectory_session.request_stop()
                 self.status_label.setText(
-                    "La adquisición terminó antes de lo esperado. "
+                    "Una adquisición terminó antes de lo esperado. "
                     "Retornando la referencia a neutral..."
                 )
                 return
 
-            self.finish_session()
-            return
+            self._request_acquisition_stop()
 
         if (
             self.pending_full_stop
@@ -932,7 +1292,16 @@ class SynchronizedSessionWindow(
                 or self.trajectory_session.is_finished
             )
         ):
-            self.runtime.acquisition.request_stop()
+            self._request_acquisition_stop()
+
+        if (
+            self._all_acquisitions_finished()
+            and (
+                self.trajectory_session is None
+                or self.trajectory_session.is_finished
+            )
+        ):
+            self.finish_session()
 
     def _trajectory_summary(
         self,
@@ -966,9 +1335,20 @@ class SynchronizedSessionWindow(
 
         self.runtime_timer.stop()
 
+        if self.runtime.acquisition.is_running:
+            self.runtime.acquisition.request_stop()
+
         self.runtime.acquisition.join(
-            timeout=1.0
+            timeout=10.0
         )
+
+        if self.force_runtime is not None:
+            if self.force_runtime.acquisition.is_running:
+                self.force_runtime.acquisition.request_stop()
+
+            self.force_runtime.acquisition.join(
+                timeout=10.0
+            )
 
         if (
             self.trajectory_session is not None
@@ -994,12 +1374,26 @@ class SynchronizedSessionWindow(
             self.live_window.close()
             self.live_window = None
 
+        if self.force_live_window is not None:
+            try:
+                self.force_live_window.timer.stop()
+            except Exception:
+                pass
+
+            self.force_live_window.close()
+            self.force_live_window = None
+
         self.programmatic_live_close = False
 
         acquisition_summary = build_acquisition_summary(
             self.runtime
         )
         trajectory_summary = self._trajectory_summary()
+        force_summary = (
+            build_force_summary(self.force_runtime)
+            if self.force_runtime is not None
+            else None
+        )
 
         session_duration_s = max(
             0.0,
@@ -1013,12 +1407,15 @@ class SynchronizedSessionWindow(
             session_duration_s=session_duration_s,
             acquisition_summary=acquisition_summary,
             trajectory_summary=trajectory_summary,
+            force_summary=force_summary,
         )
 
         summary_text = (
             format_acquisition_summary(
                 acquisition_summary
             )
+            + "\n"
+            + format_force_summary(force_summary)
             + "\n"
             + f"Reporte final: {report_path}"
         )
@@ -1032,6 +1429,20 @@ class SynchronizedSessionWindow(
                 "close_error",
             )
         )
+
+        if (
+            force_summary is not None
+            and (
+                force_summary.get("runtime_error") is not None
+                or force_summary.get("stop_error") is not None
+                or force_summary.get(
+                    "live_buffer_error_count",
+                    0,
+                )
+                != 0
+            )
+        ):
+            has_error = True
 
         if (
             trajectory_summary is not None
@@ -1088,6 +1499,8 @@ class SynchronizedSessionWindow(
         self.runtime = None
         self.trajectory_session = None
         self.live_window = None
+        self.force_runtime = None
+        self.force_live_window = None
         self.pending_full_stop = False
         self.trajectory_completion_handled = False
         self.trajectory_started_once = False
@@ -1124,8 +1537,25 @@ class SynchronizedSessionWindow(
                 QtWidgets.QMessageBox.critical(
                     self,
                     "Cierre incompleto",
-                    "El hilo de adquisición no terminó "
-                    "dentro de 10 segundos.",
+                    "El hilo sEMG no terminó dentro de 10 segundos.",
+                )
+
+        if (
+            self.force_runtime is not None
+            and self.force_runtime.acquisition.is_running
+        ):
+            self.force_runtime.acquisition.request_stop()
+            force_stopped = (
+                self.force_runtime.acquisition.join(
+                    timeout=10.0
+                )
+            )
+
+            if not force_stopped:
+                QtWidgets.QMessageBox.critical(
+                    self,
+                    "Cierre incompleto",
+                    "El hilo ATI no terminó dentro de 10 segundos.",
                 )
 
         self.programmatic_live_close = True
@@ -1137,6 +1567,14 @@ class SynchronizedSessionWindow(
                 pass
 
             self.live_window.close()
+
+        if self.force_live_window is not None:
+            try:
+                self.force_live_window.timer.stop()
+            except Exception:
+                pass
+
+            self.force_live_window.close()
 
         event.accept()
 

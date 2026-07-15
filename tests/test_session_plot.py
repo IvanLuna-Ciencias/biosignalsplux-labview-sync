@@ -57,6 +57,64 @@ def create_test_session(directory) -> None:
                 ]
             )
 
+    force_path = directory / "force_test.csv"
+
+    with force_path.open(
+        "w",
+        newline="",
+        encoding="utf-8",
+    ) as file:
+        writer = csv.writer(file)
+        writer.writerow(
+            [
+                "sample_index",
+                "device_sample_index",
+                "time_device_s",
+                "time_monotonic_s",
+                "timestamp_host",
+                "ai0_v",
+                "ai1_v",
+                "ai2_v",
+                "ai3_v",
+                "ai4_v",
+                "ai5_v",
+                "fx_n",
+                "fy_n",
+                "fz_n",
+                "mx_nm",
+                "my_nm",
+                "mz_nm",
+                "force_norm_n",
+                "torque_norm_nm",
+            ]
+        )
+
+        for index in range(1000):
+            time_s = index / 1000.0
+            writer.writerow(
+                [
+                    index,
+                    index,
+                    time_s,
+                    time_s,
+                    "2026-07-14T12:00:00+00:00",
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    index / 100.0,
+                    -(index / 200.0),
+                    1.0,
+                    index / 10000.0,
+                    -(index / 20000.0),
+                    0.01,
+                    0.0,
+                    0.0,
+                ]
+            )
+
     trajectory_path = (
         directory / "trajectories_test.csv"
     )
@@ -149,6 +207,8 @@ def test_create_session_plots(tmp_path) -> None:
 
     assert summary["emg"]["rows"] == 1000
     assert summary["emg"]["points_displayed"] == 100
+    assert summary["force"]["rows"] == 1000
+    assert summary["force"]["points_displayed"] == 100
     assert summary["trajectory"]["rows"] == 50
     assert summary["events"]["count"] == 2
 
@@ -188,6 +248,10 @@ def test_create_session_plots(tmp_path) -> None:
         "emg_0",
         "emg_1",
     ]
+    assert saved["force"]["rows"] == 1000
+    assert saved["force_csv"].endswith(
+        "force_test.csv"
+    )
 
     assert "robot_trajectory" not in saved
 

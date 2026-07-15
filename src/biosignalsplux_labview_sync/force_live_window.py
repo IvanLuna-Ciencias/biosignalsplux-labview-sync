@@ -22,6 +22,7 @@ class ForceLiveWindow(QtWidgets.QMainWindow):
         window_seconds: float = 5.0,
         refresh_interval_ms: int = 50,
         stop_callback: Callable[[], None] | None = None,
+        show_stop_button: bool = True,
     ) -> None:
         super().__init__()
         if live_buffer.channel_count != 6:
@@ -31,6 +32,7 @@ class ForceLiveWindow(QtWidgets.QMainWindow):
         self.sampling_rate_hz = sampling_rate_hz
         self.window_seconds = float(window_seconds)
         self.stop_callback = stop_callback
+        self.show_stop_button = bool(show_stop_button)
         self._stop_requested = False
 
         self.setWindowTitle("ATI force/torque monitor")
@@ -75,6 +77,7 @@ class ForceLiveWindow(QtWidgets.QMainWindow):
         status_layout.addWidget(self.status_label, stretch=1)
         self.stop_button = QtWidgets.QPushButton("STOP sesión")
         self.stop_button.clicked.connect(self.request_stop)
+        self.stop_button.setVisible(self.show_stop_button)
         status_layout.addWidget(self.stop_button)
         layout.addLayout(status_layout)
 

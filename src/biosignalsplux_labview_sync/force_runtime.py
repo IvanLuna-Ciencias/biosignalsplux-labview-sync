@@ -151,6 +151,13 @@ def build_force_summary(runtime: PreparedForceRuntime) -> dict[str, object]:
     results = runtime.acquisition.results
     return {
         "enabled": True,
+        "device": runtime.settings.device,
+        "channels": list(runtime.settings.channels),
+        "sampling_rate_hz": runtime.settings.sampling_rate_hz,
+        "bias_seconds": runtime.settings.bias_seconds,
+        "calibration_file": str(
+            runtime.settings.calibration_file
+        ),
         "termination_reason": results.termination_reason,
         "samples_received": results.samples_received,
         "samples_written": (

@@ -31,6 +31,7 @@ class SessionPlotFiles:
 
     session_directory: Path
     emg_csv: Path
+    force_csv: Path | None
     trajectories_csv: Path | None
     events_csv: Path | None
     sync_report_json: Path | None
@@ -140,6 +141,13 @@ def discover_session_files(
             f"No sEMG CSV was found in {directory}."
         )
 
+    force_csv = _latest_matching_file(
+        directory,
+        (
+            "force_*.csv",
+        ),
+    )
+
     trajectories_csv = _latest_matching_file(
         directory,
         (
@@ -166,6 +174,7 @@ def discover_session_files(
     return SessionPlotFiles(
         session_directory=directory,
         emg_csv=emg_csv,
+        force_csv=force_csv,
         trajectories_csv=trajectories_csv,
         events_csv=events_csv,
         sync_report_json=sync_report_json,
@@ -264,6 +273,79 @@ def read_emg_csv(
         {
             name: np.asarray(values, dtype=float)
             for name, values in channels.items()
+        },
+    )
+
+
+def read_force_csv(
+    path: str | Path,
+) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+    """Read session-relative ATI force and torque channels."""
+
+    csv_path = Path(path)
+    required_fields = (
+        "time_monotonic_s",
+        "fx_n",
+        "fy_n",
+        "fz_n",
+        "mx_nm",
+        "my_nm",
+        "mz_nm",
+    )
+
+    with csv_path.open(
+        "r",
+        newline="",
+        encoding="utf-8-sig",
+    ) as file:
+        reader = csv.DictReader(file)
+        fieldnames = reader.fieldnames or []
+
+        missing = [
+            name
+            for name in required_fields
+            if name not in fieldnames
+        ]
+
+        if missing:
+            raise SessionPlotError(
+                f"{csv_path} is missing columns: {', '.join(missing)}."
+            )
+
+        columns: dict[str, list[float]] = {
+            name: []
+            for name in required_fields
+        }
+
+        for row_number, row in enumerate(
+            reader,
+            start=2,
+        ):
+            for field_name in required_fields:
+                columns[field_name].append(
+                    _parse_float(
+                        row.get(field_name),
+                        field_name=field_name,
+                        row_number=row_number,
+                        path=csv_path,
+                    )
+                )
+
+    if not columns["time_monotonic_s"]:
+        raise SessionPlotError(
+            f"The ATI force CSV is empty: {csv_path}"
+        )
+
+    times = np.asarray(
+        columns.pop("time_monotonic_s"),
+        dtype=float,
+    )
+
+    return (
+        times,
+        {
+            name: np.asarray(values, dtype=float)
+            for name, values in columns.items()
         },
     )
 
@@ -513,38 +595,57 @@ def create_session_plots(
     figures = []
     output_plots: list[str] = []
 
-    emg_figure = plt.figure(
-        figsize=(14, 6)
+    channel_items = list(
+        emg_channels.items()
     )
-    emg_axis = emg_figure.add_subplot(111)
 
-    for channel_name, values in emg_channels.items():
-        emg_axis.plot(
+    emg_figure, emg_axes = plt.subplots(
+        len(channel_items),
+        1,
+        sharex=True,
+        figsize=(
+            14,
+            max(6, 3.2 * len(channel_items)),
+        ),
+    )
+
+    if len(channel_items) == 1:
+        emg_axes = [emg_axes]
+
+    for axis, (
+        channel_name,
+        values,
+    ) in zip(
+        emg_axes,
+        channel_items,
+    ):
+        axis.plot(
             emg_time[emg_indices],
             values[emg_indices],
             linewidth=0.7,
-            label=channel_name,
+        )
+        _add_event_markers(
+            axis,
+            events,
+        )
+        axis.set_title(
+            channel_name
+        )
+        axis.set_ylabel(
+            "Amplitud cruda (ADC)"
+        )
+        axis.grid(
+            True,
+            alpha=0.25,
         )
 
-    _add_event_markers(
-        emg_axis,
-        events,
-    )
-
-    emg_axis.set_title(
-        "sEMG cruda de la sesión"
-    )
-    emg_axis.set_xlabel(
+    emg_axes[-1].set_xlabel(
         "Tiempo de sesión (s)"
     )
-    emg_axis.set_ylabel(
-        "Amplitud cruda (ADC)"
+    emg_figure.suptitle(
+        "sEMG cruda de la sesión",
+        fontsize=14,
     )
-    emg_axis.grid(
-        True,
-        alpha=0.25,
-    )
-    emg_axis.legend()
     emg_figure.tight_layout()
 
     emg_plot_path = (
@@ -560,6 +661,34 @@ def create_session_plots(
     output_plots.append(
         str(emg_plot_path)
     )
+
+    force_summary: dict[str, Any] | None = None
+    force_time: np.ndarray | None = None
+    force_channels: dict[str, np.ndarray] | None = None
+    force_indices: np.ndarray | None = None
+
+    if files.force_csv is not None:
+        force_time, force_channels = read_force_csv(
+            files.force_csv
+        )
+        force_indices = downsample_indices(
+            len(force_time),
+            max_emg_points,
+        )
+        force_summary = {
+            "rows": int(len(force_time)),
+            "start_time_s": float(force_time[0]),
+            "end_time_s": float(force_time[-1]),
+            "duration_s": float(
+                force_time[-1] - force_time[0]
+            ),
+            "effective_rate_hz": effective_rate_hz(
+                force_time
+            ),
+            "points_displayed": int(
+                len(force_indices)
+            ),
+        }
 
     trajectory_summary: dict[str, Any] | None = None
     trajectory_time: np.ndarray | None = None
@@ -664,7 +793,7 @@ def create_session_plots(
         reference_labels = {
             "q_shoulder_ref_rad": "Hombro",
             "q_elbow_ref_rad": "Codo",
-            "q_rotation_ref_rad": "Rotaci?n",
+            "q_rotation_ref_rad": "Rotación",
         }
 
         active_joint_label = reference_labels.get(
@@ -672,11 +801,18 @@ def create_session_plots(
             active_reference_name,
         )
 
+        has_force = (
+            force_time is not None
+            and force_channels is not None
+            and force_indices is not None
+        )
+        panel_count = 5 if has_force else 3
+
         comparison_figure, comparison_axes = plt.subplots(
-            3,
+            panel_count,
             1,
             sharex=True,
-            figsize=(14, 10),
+            figsize=(14, 15 if has_force else 10),
         )
 
         comparison_axes[0].plot(
@@ -689,7 +825,7 @@ def create_session_plots(
             f"{active_joint_label}"
         )
         comparison_axes[0].set_ylabel(
-            "Referencia (?)"
+            "Referencia (°)"
         )
 
         emg_names = list(
@@ -724,6 +860,56 @@ def create_session_plots(
                     verticalalignment="center",
                 )
 
+        if has_force:
+            assert force_time is not None
+            assert force_channels is not None
+            assert force_indices is not None
+
+            force_axis = comparison_axes[3]
+            for channel_name in (
+                "fx_n",
+                "fy_n",
+                "fz_n",
+            ):
+                force_axis.plot(
+                    force_time[force_indices],
+                    force_channels[channel_name][force_indices],
+                    linewidth=0.75,
+                    label=channel_name.replace("_n", "").upper(),
+                )
+            force_axis.set_title(
+                "Fuerzas ATI"
+            )
+            force_axis.set_ylabel(
+                "Fuerza (N)"
+            )
+            force_axis.legend(
+                loc="upper right"
+            )
+
+            torque_axis = comparison_axes[4]
+            torque_labels = {
+                "mx_nm": "Mx",
+                "my_nm": "My",
+                "mz_nm": "Mz",
+            }
+            for channel_name, label in torque_labels.items():
+                torque_axis.plot(
+                    force_time[force_indices],
+                    force_channels[channel_name][force_indices],
+                    linewidth=0.75,
+                    label=label,
+                )
+            torque_axis.set_title(
+                "Torques ATI"
+            )
+            torque_axis.set_ylabel(
+                "Torque (N·m)"
+            )
+            torque_axis.legend(
+                loc="upper right"
+            )
+
         for axis in comparison_axes:
             _add_event_markers(
                 axis,
@@ -735,12 +921,16 @@ def create_session_plots(
             )
 
         comparison_axes[-1].set_xlabel(
-            "Tiempo de sesi?n (s)"
+            "Tiempo de sesión (s)"
         )
 
         comparison_figure.suptitle(
-            "Comparaci?n sincronizada: "
-            "trayectoria calculada y sEMG",
+            (
+                "Comparación sincronizada: trayectoria, "
+                "sEMG y ATI"
+                if has_force
+                else "Comparación sincronizada: trayectoria y sEMG"
+            ),
             fontsize=14,
         )
         comparison_figure.tight_layout()
@@ -786,6 +976,11 @@ def create_session_plots(
         "emg_csv": str(
             files.emg_csv
         ),
+        "force_csv": (
+            str(files.force_csv)
+            if files.force_csv is not None
+            else None
+        ),
         "trajectories_csv": (
             str(files.trajectories_csv)
             if files.trajectories_csv is not None
@@ -818,6 +1013,7 @@ def create_session_plots(
                 len(emg_indices)
             ),
         },
+        "force": force_summary,
         "trajectory": trajectory_summary,
         "events": {
             "count": len(events),

@@ -58,6 +58,7 @@ class EMGLiveWindow(QtWidgets.QMainWindow):
         window_seconds: float = 5.0,
         refresh_interval_ms: int = 50,
         stop_callback: Callable[[], None] | None = None,
+        show_stop_button: bool = True,
     ) -> None:
         super().__init__()
 
@@ -67,6 +68,7 @@ class EMGLiveWindow(QtWidgets.QMainWindow):
         self.window_seconds = float(window_seconds)
         self.refresh_interval_ms = refresh_interval_ms
         self.stop_callback = stop_callback
+        self.show_stop_button = bool(show_stop_button)
 
         if len(self.channel_names) != self.live_buffer.channel_count:
             raise EMGLiveWindowError(
@@ -143,6 +145,7 @@ class EMGLiveWindow(QtWidgets.QMainWindow):
             "STOP acquisition safely"
         )
         self.stop_button.clicked.connect(self.request_stop)
+        self.stop_button.setVisible(self.show_stop_button)
         status_layout.addWidget(self.stop_button)
 
         main_layout.addLayout(status_layout)
