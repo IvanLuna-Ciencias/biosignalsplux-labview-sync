@@ -52,3 +52,6 @@ sdk/
 
 # Python package metadata
 *.egg-info/
+
+# Local ATI calibration files
+*.cal

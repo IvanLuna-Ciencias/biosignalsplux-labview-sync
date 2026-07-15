@@ -29,6 +29,7 @@ classifiers = [
 dependencies = []
 
 [project.optional-dependencies]
+force = ["nidaqmx"]
 dev = [
     "pytest>=8,<9"
 ]

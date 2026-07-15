@@ -1,0 +1,19 @@
+{
+  "force_sensor": {
+    "enabled": true,
+    "calibration_file": "C:\\Tools\\ATI\\FT11495.cal",
+    "device": "Dev1",
+    "channels": [
+      "Dev1/ai0",
+      "Dev1/ai1",
+      "Dev1/ai2",
+      "Dev1/ai3",
+      "Dev1/ai4",
+      "Dev1/ai5"
+    ],
+    "sampling_rate_hz": 1000,
+    "bias_seconds": 1.0,
+    "flush_interval_samples": 1000,
+    "live_window_seconds": 5.0
+  }
+}
